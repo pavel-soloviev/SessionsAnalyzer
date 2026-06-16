@@ -5,18 +5,13 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.mapreduce.lib.input.TextInputFormat
 import org.apache.hadoop.io.{LongWritable, Text}
 
-// --- ООП Структуры Данных ---
 
-// Класс для хранения данных быстрого поиска
 case class QuickSearch(id: String)
 
-// Класс для хранения данных карточки поиска (пока сохраняем строку с результатами целиком)
 case class CardSearch(resultsLine: String)
 
-// Класс для хранения факта открытия документа
 case class DocOpen(isoDate: String, searchId: String, docId: String)
 
-// Главный класс, описывающий всю сессию целиком
 case class UserSession(
                         quickSearches: List[QuickSearch],
                         cardSearches: List[CardSearch],
@@ -32,7 +27,6 @@ object ConsultantAnalytics {
       .appName("Sessions Analyzer")
       .master("local[*]")
 
-    // Обходной путь для Windows
     if (System.getProperty("os.name").startsWith("Windows")) {
       sparkBuilder.config("spark.hadoop.fs.file.impl", classOf[BareLocalFileSystem].getName)
     }
@@ -46,7 +40,6 @@ object ConsultantAnalytics {
     val hadoopConf = new Configuration()
     hadoopConf.set("textinputformat.record.delimiter", "SESSION_START")
 
-    // Читаем все файлы по маске
     val rawSessionsRDD = sc.newAPIHadoopFile(
         logFilePath,
         classOf[TextInputFormat],
@@ -56,7 +49,7 @@ object ConsultantAnalytics {
       ).map { case (_, text) => text.toString }
       .filter(_.trim.nonEmpty)
 
-    // --- ЭТАП 1: Парсинг сырого текста в ООП-объекты ---
+    // пирсинг логов
     val parsedSessionsRDD = rawSessionsRDD.map { sessionText =>
       val lines = sessionText.split("\n").map(_.trim).filter(_.nonEmpty)
 
@@ -80,13 +73,11 @@ object ConsultantAnalytics {
       for (line <- lines) {
         if (lastWasQS) {
           val parts = line.split(" ")
-          if (parts.nonEmpty) {
-            qsList += QuickSearch(id = parts.head) // Создаем объект QS
-          }
+          qsList += QuickSearch(id = parts.head)
           lastWasQS = false
         }
         else if (lastWasCardSearchEnd) {
-          cardList += CardSearch(resultsLine = line) // Создаем объект CardSearch
+          cardList += CardSearch(resultsLine = line)
           lastWasCardSearchEnd = false
         }
 
@@ -140,13 +131,12 @@ object ConsultantAnalytics {
 
     // 2. Открытия документов из быстрого поиска
     val dailyDocOpens = parsedSessionsRDD.flatMap { session =>
-        // Собираем множество ID быстрых поисков для этой сессии (для быстрого поиска O(1))
+        // множество ID быстрых поисков для этой сессии
         val qsIds = session.quickSearches.map(_.id).toSet
 
-        // Оставляем только те открытия документов, которые были из быстрого поиска
+        // оставляем только те открытия документов, которые были из быстрого поиска
         val qsOpens = session.docOpens.filter(open => qsIds.contains(open.searchId))
 
-        // Переводим в нужный формат: ((Дата, DocId), 1) для reduceByKey
         qsOpens.map(open => ((open.isoDate, open.docId), 1))
       }
       .reduceByKey(_ + _)
