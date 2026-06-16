@@ -5,16 +5,34 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.mapreduce.lib.input.TextInputFormat
 import org.apache.hadoop.io.{LongWritable, Text}
 
+// --- ООП Структуры Данных ---
+
+// Класс для хранения данных быстрого поиска
+case class QuickSearch(id: String)
+
+// Класс для хранения данных карточки поиска (пока сохраняем строку с результатами целиком)
+case class CardSearch(resultsLine: String)
+
+// Класс для хранения факта открытия документа
+case class DocOpen(isoDate: String, searchId: String, docId: String)
+
+// Главный класс, описывающий всю сессию целиком
+case class UserSession(
+                        quickSearches: List[QuickSearch],
+                        cardSearches: List[CardSearch],
+                        docOpens: List[DocOpen]
+                      )
+
 object ConsultantAnalytics {
   def main(args: Array[String]): Unit = {
 
-    val startTime = System.nanoTime() // замерим общее время выполнения программы
+    val startTime = System.nanoTime()
 
     val sparkBuilder = SparkSession.builder()
       .appName("Sessions Analyzer")
       .master("local[*]")
 
-    // нужно, чтобы обойти проблемы с правами доступа на винде
+    // Обходной путь для Windows
     if (System.getProperty("os.name").startsWith("Windows")) {
       sparkBuilder.config("spark.hadoop.fs.file.impl", classOf[BareLocalFileSystem].getName)
     }
@@ -28,8 +46,8 @@ object ConsultantAnalytics {
     val hadoopConf = new Configuration()
     hadoopConf.set("textinputformat.record.delimiter", "SESSION_START")
 
-    // Читаем все файлы по маске, разбивая их на лету по SESSION_START
-    val sessionsRDD = sc.newAPIHadoopFile(
+    // Читаем все файлы по маске
+    val rawSessionsRDD = sc.newAPIHadoopFile(
         logFilePath,
         classOf[TextInputFormat],
         classOf[LongWritable],
@@ -38,73 +56,99 @@ object ConsultantAnalytics {
       ).map { case (_, text) => text.toString }
       .filter(_.trim.nonEmpty)
 
-    // парсим каждую сессию
-    val parsedRDD = sessionsRDD.map { sessionText =>
+    // --- ЭТАП 1: Парсинг сырого текста в ООП-объекты ---
+    val parsedSessionsRDD = rawSessionsRDD.map { sessionText =>
       val lines = sessionText.split("\n").map(_.trim).filter(_.nonEmpty)
 
-      var countACC = 0
-      var qsSearchIds = Set.empty[String]
-      val qsDocOpens = ListBuffer.empty[((String, String), Int)] // ((Дата, DocId), 1)
+      val qsList = ListBuffer.empty[QuickSearch]
+      val cardList = ListBuffer.empty[CardSearch]
+      val opensList = ListBuffer.empty[DocOpen]
 
-      var lastWasQS = false // предыдущая строка начиналась с QS (считаем, что "QS" и запрос всегда на одной стоке)
-      var lastWasCardSearchEnd = false // предыдущая строка содержала CARD_SEARCH_END
+      /* запомним дату сессии, т.к. в некоторых логах есть баг и после doc_open не пишется дата;
+       для таких doc_open будем считать, что документ открыли в тот же день, когда началась сессия */
+      var sessionIsoDate = "UNKNOWN_DATE"
+      if (lines.nonEmpty) {
+        val startDateTimeRaw = lines.head // "08.02.2020_07:46:04"
+        val startDateRaw = startDateTimeRaw.split("_")(0)
+        val startDateParts = startDateRaw.split("\\.")
+        sessionIsoDate = s"${startDateParts(2)}-${startDateParts(1)}-${startDateParts(0)}"
+      }
+
+      var lastWasQS = false
+      var lastWasCardSearchEnd = false
 
       for (line <- lines) {
         if (lastWasQS) {
           val parts = line.split(" ")
           if (parts.nonEmpty) {
-            qsSearchIds += parts.head // сохраняем ID быстрого поиска
+            qsList += QuickSearch(id = parts.head) // Создаем объект QS
           }
           lastWasQS = false
         }
-
         else if (lastWasCardSearchEnd) {
-          // ищем документ с идентификатором ACC_45616 в результатах поиска через карточку
-          if (line.contains("ACC_45616")) {
-            countACC += 1
-          }
+          cardList += CardSearch(resultsLine = line) // Создаем объект CardSearch
           lastWasCardSearchEnd = false
         }
 
-        // проверяем текущую строку, чтобы выставить флаги для следующей
         if (line.startsWith("QS")) {
           lastWasQS = true
         } else if (line.startsWith("CARD_SEARCH_END")) {
           lastWasCardSearchEnd = true
         } else if (line.startsWith("DOC_OPEN")) {
-          val parts = line.split(" ")
-          // защита от ошибок формата лога
+          val parts = line.split("\\s+")
+
+          // стадартный лог (DOC_OPEN + Дата + ID_поиска + ID_документа)
           if (parts.length >= 4) {
             val dateTime = parts(1)
             val searchId = parts(2)
             val docId = parts(3)
 
-            /* проверяем, относится ли это открытие к быстрому поиску (совпадают id поиска и id в логе doc_open)
-            и сортируем по дате
-            */
-            if (qsSearchIds.contains(searchId)) {
-              val dateRaw = dateTime.split("_")(0)
-              val dateParts = dateRaw.split("\\.")
+            val dateRaw = dateTime.split("_")(0)
+            val dateParts = dateRaw.split("\\.")
 
-              if (dateParts.length == 3) {
-                val isoDate = s"${dateParts(2)}-${dateParts(1)}-${dateParts(0)}"
-                qsDocOpens += (((isoDate, docId), 1))
-              }
+            if (dateParts.length == 3) {
+              val isoDate = s"${dateParts(2)}-${dateParts(1)}-${dateParts(0)}"
+              opensList += DocOpen(isoDate, searchId, docId)
+            } else {
+              println("Неизвестный формат даты.")
             }
+          }
+          // лог с ошибкой (DOC_OPEN + ID_поиска + ID_документа)
+          else if (parts.length == 3) {
+            val searchId = parts(1)
+            val docId = parts(2)
+            opensList += DocOpen(sessionIsoDate, searchId, docId)
+          } else {
+            println("Неизвестный формат doc_open.")
           }
         }
       }
-      // возвращаем результат по отдельной сессии
-      (countACC, qsDocOpens.toList)
+
+      UserSession(qsList.toList, cardList.toList, opensList.toList)
     }
 
-    // 1
-    val totalACC_45616 = parsedRDD.map(_._1).sum()
+    parsedSessionsRDD.cache()
+
+
+    // 1. Поиск документа ACC_45616 в карточке
+    val totalACC_45616 = parsedSessionsRDD.map { session =>
+      // Считаем внутри сессии только те карточки, где в результатах есть нужный ID
+      session.cardSearches.count(card => card.resultsLine.contains("ACC_45616"))
+    }.sum()
+
     println(s"Количество поисков документа ACC_45616 в карточке: ${totalACC_45616.toInt}")
 
-    // 2
-    val dailyDocOpens = parsedRDD
-      .flatMap(_._2)
+    // 2. Открытия документов из быстрого поиска
+    val dailyDocOpens = parsedSessionsRDD.flatMap { session =>
+        // Собираем множество ID быстрых поисков для этой сессии (для быстрого поиска O(1))
+        val qsIds = session.quickSearches.map(_.id).toSet
+
+        // Оставляем только те открытия документов, которые были из быстрого поиска
+        val qsOpens = session.docOpens.filter(open => qsIds.contains(open.searchId))
+
+        // Переводим в нужный формат: ((Дата, DocId), 1) для reduceByKey
+        qsOpens.map(open => ((open.isoDate, open.docId), 1))
+      }
       .reduceByKey(_ + _)
       .sortByKey()
 
