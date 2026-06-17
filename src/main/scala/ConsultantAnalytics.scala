@@ -6,7 +6,7 @@ import org.apache.hadoop.mapreduce.lib.input.TextInputFormat
 import org.apache.hadoop.io.{LongWritable, Text}
 
 
-case class QuickSearch(id: String)
+case class QuickSearch(id: String, query: String, results: List[String])
 
 case class CardSearch(resultsLine: String)
 
@@ -46,8 +46,37 @@ object ConsultantAnalytics {
         classOf[LongWritable],
         classOf[Text],
         hadoopConf
-      ).map { case (_, text) => text.toString }
+      ).map { case (_, text) =>
+        // Берем сырые байты и декодируем их из Windows-1251
+        new String(text.getBytes, 0, text.getLength, "Windows-1251")
+      }
       .filter(_.trim.nonEmpty)
+
+    val cardParamsRDD = rawSessionsRDD.flatMap { sessionText =>
+      val lines = sessionText.split("\n").map(_.trim).filter(_.nonEmpty)
+      val params = ListBuffer.empty[String]
+
+      var inCardSearch = false
+
+      for (line <- lines) {
+        if (line.startsWith("CARD_SEARCH_START")) {
+          inCardSearch = true
+        } else if (line.startsWith("CARD_SEARCH_END")) {
+          inCardSearch = false
+        } else if (inCardSearch) {
+          // Если мы находимся внутри карточки (между START и END),
+          // значит текущая строка — это параметр. Запоминаем её.
+          params += line
+        }
+      }
+      params.toList
+    }
+
+    println("\n=== УНИКАЛЬНЫЕ ПАРАМЕТРЫ КАРТОЧКИ ПОИСКА ===")
+    // Берем только уникальные строки с помощью .distinct()
+    // .take(50) ограничит вывод 50 строками, чтобы не зависла консоль, если их слишком много
+    cardParamsRDD.distinct().take(50).foreach(println)
+    println("============================================\n")
 
     // пирсинг логов
     val parsedSessionsRDD = rawSessionsRDD.map { sessionText =>
@@ -67,22 +96,32 @@ object ConsultantAnalytics {
         sessionIsoDate = s"${startDateParts(2)}-${startDateParts(1)}-${startDateParts(0)}"
       }
 
-      var lastWasQS = false
+      var pendingQsQuery: Option[String] = None // Хранит запрос из строки QS до следующей строки
       var lastWasCardSearchEnd = false
 
       for (line <- lines) {
-        if (lastWasQS) {
-          val parts = line.split(" ")
-          qsList += QuickSearch(id = parts.head)
-          lastWasQS = false
-        }
-        else if (lastWasCardSearchEnd) {
+        if (pendingQsQuery.isDefined) {
+          val parts = line.split("\\s+")
+          if (parts.nonEmpty) {
+            val id = parts.head
+            val results = parts.tail.toList
+            qsList += QuickSearch(id, pendingQsQuery.get, results)
+          }
+          pendingQsQuery = None
+        } else if (lastWasCardSearchEnd) {
           cardList += CardSearch(resultsLine = line)
           lastWasCardSearchEnd = false
         }
 
         if (line.startsWith("QS")) {
-          lastWasQS = true
+          val startIdx = line.indexOf("{")
+          val endIdx = line.lastIndexOf("}")
+
+          // Безопасно извлекаем текст между ними
+          val queryText = line.substring(startIdx + 1, endIdx)
+
+          // Сохраняем запрос в нашу переменную-состояние
+          pendingQsQuery = Some(queryText)
         } else if (line.startsWith("CARD_SEARCH_END")) {
           lastWasCardSearchEnd = true
         } else if (line.startsWith("DOC_OPEN")) {
