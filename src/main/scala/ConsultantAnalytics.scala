@@ -4,15 +4,17 @@ import com.globalmentor.apache.hadoop.fs.BareLocalFileSystem
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.mapreduce.lib.input.TextInputFormat
 import org.apache.hadoop.io.{LongWritable, Text}
+//import java.time.LocalDate
 
 
 case class QuickSearch(id: String, query: String, results: List[String])
 
-case class CardSearch(resultsLine: String)
+case class CardSearch(param0: List[String], param134: List[String], resultsLine: String)
 
 case class DocOpen(isoDate: String, searchId: String, docId: String)
 
 case class UserSession(
+                        date: String,
                         quickSearches: List[QuickSearch],
                         cardSearches: List[CardSearch],
                         docOpens: List[DocOpen]
@@ -40,6 +42,7 @@ object ConsultantAnalytics {
     val hadoopConf = new Configuration()
     hadoopConf.set("textinputformat.record.delimiter", "SESSION_START")
 
+    // читаем все сессии
     val rawSessionsRDD = sc.newAPIHadoopFile(
         logFilePath,
         classOf[TextInputFormat],
@@ -47,36 +50,10 @@ object ConsultantAnalytics {
         classOf[Text],
         hadoopConf
       ).map { case (_, text) =>
-        // Берем сырые байты и декодируем их из Windows-1251
         new String(text.getBytes, 0, text.getLength, "Windows-1251")
       }
       .filter(_.trim.nonEmpty)
 
-    val cardParamsRDD = rawSessionsRDD.flatMap { sessionText =>
-      val lines = sessionText.split("\n").map(_.trim).filter(_.nonEmpty)
-      val params = ListBuffer.empty[String]
-
-      var inCardSearch = false
-
-      for (line <- lines) {
-        if (line.startsWith("CARD_SEARCH_START")) {
-          inCardSearch = true
-        } else if (line.startsWith("CARD_SEARCH_END")) {
-          inCardSearch = false
-        } else if (inCardSearch) {
-          // Если мы находимся внутри карточки (между START и END),
-          // значит текущая строка — это параметр. Запоминаем её.
-          params += line
-        }
-      }
-      params.toList
-    }
-
-    println("\n=== УНИКАЛЬНЫЕ ПАРАМЕТРЫ КАРТОЧКИ ПОИСКА ===")
-    // Берем только уникальные строки с помощью .distinct()
-    // .take(50) ограничит вывод 50 строками, чтобы не зависла консоль, если их слишком много
-    cardParamsRDD.distinct().take(50).foreach(println)
-    println("============================================\n")
 
     // пирсинг логов
     val parsedSessionsRDD = rawSessionsRDD.map { sessionText =>
@@ -96,8 +73,12 @@ object ConsultantAnalytics {
         sessionIsoDate = s"${startDateParts(2)}-${startDateParts(1)}-${startDateParts(0)}"
       }
 
-      var pendingQsQuery: Option[String] = None // Хранит запрос из строки QS до следующей строки
+      var pendingQsQuery: Option[String] = None // хранит запрос из строки QS до следующей строки
       var lastWasCardSearchEnd = false
+
+      var inCardSearch = false // true если мы парсим параметры поиска через КП
+      val currentParam0 = ListBuffer.empty[String]
+      val currentParam134 = ListBuffer.empty[String]
 
       for (line <- lines) {
         if (pendingQsQuery.isDefined) {
@@ -109,21 +90,28 @@ object ConsultantAnalytics {
           }
           pendingQsQuery = None
         } else if (lastWasCardSearchEnd) {
-          cardList += CardSearch(resultsLine = line)
+          cardList += CardSearch(currentParam0.toList, currentParam134.toList, resultsLine = line)
+          currentParam0.clear()
+          currentParam134.clear()
           lastWasCardSearchEnd = false
         }
 
         if (line.startsWith("QS")) {
           val startIdx = line.indexOf("{")
           val endIdx = line.lastIndexOf("}")
-
-          // Безопасно извлекаем текст между ними
           val queryText = line.substring(startIdx + 1, endIdx)
-
-          // Сохраняем запрос в нашу переменную-состояние
           pendingQsQuery = Some(queryText)
+        } else if (line.startsWith("CARD_SEARCH_START")) {
+          inCardSearch = true
         } else if (line.startsWith("CARD_SEARCH_END")) {
+          inCardSearch = false
           lastWasCardSearchEnd = true
+        } else if (inCardSearch) {
+          if (line.startsWith("$0 ")) {
+            currentParam0 += line.stripPrefix("$0 ").trim
+          } else if (line.startsWith("$134 ")) {
+            currentParam134 += line.stripPrefix("$134 ").trim
+          }
         } else if (line.startsWith("DOC_OPEN")) {
           val parts = line.split("\\s+")
 
@@ -154,19 +142,45 @@ object ConsultantAnalytics {
         }
       }
 
-      UserSession(qsList.toList, cardList.toList, opensList.toList)
+      UserSession(sessionIsoDate, qsList.toList, cardList.toList, opensList.toList)
     }
 
     parsedSessionsRDD.cache()
 
 
     // 1. Поиск документа ACC_45616 в карточке
-    val totalACC_45616 = parsedSessionsRDD.map { session =>
-      // Считаем внутри сессии только те карточки, где в результатах есть нужный ID
-      session.cardSearches.count(card => card.resultsLine.contains("ACC_45616"))
-    }.sum()
+    val accSearchVariantsRDD = parsedSessionsRDD.flatMap { session =>
+      session.cardSearches.flatMap { card =>
+        val targetEng = "ACC_45616"
+        val targetRus = "АСС_45616" // первые три буквы на кириллице
 
-    println(s"Количество поисков документа ACC_45616 в карточке: ${totalACC_45616.toInt}")
+        val foundVariants = scala.collection.mutable.ListBuffer.empty[String]
+
+        // параметр $0
+        card.param0.foreach { p =>
+          if (p.contains(targetEng)) foundVariants += "Параметр $0 (Английское ACC)"
+          if (p.contains(targetRus)) foundVariants += "Параметр $0 (Русское АСС)"
+        }
+
+        // параметр $134
+        card.param134.foreach { p =>
+          if (p.contains(targetEng)) foundVariants += "Параметр $134 (Английское ACC)"
+          if (p.contains(targetRus)) foundVariants += "Параметр $134 (Русское АСС)"
+        }
+
+        foundVariants.distinct.toList
+      }
+    }
+
+    val variantsCount = accSearchVariantsRDD.countByValue()
+
+    println("\nДетализация поисков документа ACC_45616 в карточке")
+    val totalACC_45616 = variantsCount.values.sum
+    println(s"Общее количество поисков: $totalACC_45616")
+
+    variantsCount.foreach { case (variantName, count) =>
+      println(s" - $variantName: $count")
+    }
 
     // 2. Открытия документов из быстрого поиска
     val dailyDocOpens = parsedSessionsRDD.flatMap { session =>
