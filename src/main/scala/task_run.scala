@@ -29,7 +29,7 @@ object task_run {
     val hadoopConf = new Configuration()
     hadoopConf.set("textinputformat.record.delimiter", "SESSION_START")
 
-    // Читаем сессии
+    // читаем сессии
     val rawSessionsRDD = sc.newAPIHadoopFile(
       logFilePath,
       classOf[TextInputFormat],

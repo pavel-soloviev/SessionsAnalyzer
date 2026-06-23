@@ -1,18 +1,22 @@
 package models
 
 import org.apache.spark.util.LongAccumulator
+import scala.collection.mutable
 
-import scala.collection.mutable.ListBuffer
-
-case class CardSearch(param0: Array[String], param134: Array[String], resultsLine: String)
+case class CardSearch(
+                       id: String,
+                       params: Map[String, Array[String]],
+                       results: Array[String],
+                       openedDocs: Array[DocOpen] = Array.empty
+                     )
 
 object CardSearch {
   def parse(iterator: BufferedIterator[String], errorsAcc: LongAccumulator): Option[CardSearch] = {
-    iterator.next() // пропускаем оглощаем CARD_SEARCH_START
+    iterator.next()  // пропускаем CARD_SEARCH_START
 
-    val param0 = ListBuffer.empty[String]
-    val param134 = ListBuffer.empty[String]
-    var resultsLine = ""
+    val paramsMap = mutable.Map.empty[String, mutable.ListBuffer[String]]
+    var searchId = "UNKNOWN_CARD_ID"
+    var results = Array.empty[String]
     var keepParsing = true
 
     while (iterator.hasNext && keepParsing) {
@@ -20,18 +24,30 @@ object CardSearch {
 
       if (line.startsWith("CARD_SEARCH_END")) {
         if (iterator.hasNext) {
-          resultsLine = iterator.next()
+          val resultLine = iterator.next()
+          val parts = resultLine.split("\\s+")
+          if (parts.nonEmpty) {
+            searchId = parts.head
+            results = parts.tail
+          }
         } else {
           errorsAcc.add(1L)
         }
         keepParsing = false
-      } else if (line.startsWith("$0 ")) {
-        param0 += line.stripPrefix("$0 ").trim
-      } else if (line.startsWith("$134 ")) {
-        param134 += line.stripPrefix("$134 ").trim
+      } else if (line.startsWith("$")) {
+        // парсим параметры
+        val parts = line.split("\\s+", 2)
+        if (parts.length == 2) {
+          val paramName = parts(0)
+          val paramValue = parts(1)
+
+          paramsMap.getOrElseUpdate(paramName, mutable.ListBuffer.empty) += paramValue
+        }
       }
     }
 
-    Some(CardSearch(param0.toArray, param134.toArray, resultsLine))
+    val finalParams = paramsMap.map { case (k, v) => (k, v.toArray) }.toMap
+
+    Some(CardSearch(id = searchId, params = finalParams, results = results))
   }
 }

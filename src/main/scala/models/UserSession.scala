@@ -1,57 +1,66 @@
 package models
 
 import org.apache.spark.util.LongAccumulator
-
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import scala.collection.mutable.ListBuffer
+import scala.util.Try
 
 case class UserSession(
-                        date: String,
+                        startTime: LocalDateTime,
                         quickSearches: Array[QuickSearch],
                         cardSearches: Array[CardSearch],
                         docOpens: Array[DocOpen]
                       )
 
-// Вспомогательный класс для накопления состояния в процессе парсинга
 class SessionBuilder {
-  var date: String = "UNKNOWN_DATE"
+  var startTime: LocalDateTime = LocalDateTime.MIN
   val qsList: ListBuffer[QuickSearch] = ListBuffer.empty
   val cardList: ListBuffer[CardSearch] = ListBuffer.empty
   val opensList: ListBuffer[DocOpen] = ListBuffer.empty
 
-  def build(): UserSession = UserSession(date, qsList.toArray, cardList.toArray, opensList.toArray)
+  def build(): UserSession = {
+    // группируем все открытия документов по ID поиска
+    val opensBySearchId = opensList.groupBy(_.searchId)
+
+    // раскладываем документы по быстрым поискам
+    val linkedQs = qsList.map { qs =>
+      val docsForThisSearch = opensBySearchId.getOrElse(qs.id, ListBuffer.empty).toArray
+      qs.copy(openedDocs = docsForThisSearch)
+    }.toArray
+
+    // раскладываем документы по карточкам поиска
+    val linkedCs = cardList.map { cs =>
+      val docsForThisSearch = opensBySearchId.getOrElse(cs.id, ListBuffer.empty).toArray
+      cs.copy(openedDocs = docsForThisSearch)
+    }.toArray
+
+    UserSession(startTime, linkedQs, linkedCs, opensList.toArray)
+  }
 }
 
 object UserSession {
-  /**
-   * Принимает сырой текст сессии (разделенный по SESSION_START) и возвращает готовый объект.
-   */
+  private val formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy_HH:mm:ss")
+
   def parse(sessionText: String, errorsAcc: LongAccumulator): UserSession = {
-    // Создаем буферизированный итератор
     val iterator = sessionText.split("\n").map(_.trim).filter(_.nonEmpty).iterator.buffered
     val builder = new SessionBuilder()
 
-    // Пытаемся вытащить дату сессии из первой строки
     if (iterator.hasNext) {
       val firstLine = iterator.head
-      val startDateRaw = firstLine.split("_")(0)
-      val startDateParts = startDateRaw.split("\\.")
-      if (startDateParts.length == 3) {
-        builder.date = s"${startDateParts(2)}-${startDateParts(1)}-${startDateParts(0)}"
-      }
+      builder.startTime = Try(LocalDateTime.parse(firstLine, formatter)).getOrElse(LocalDateTime.MIN)
     }
 
-    // Маршрутизация по типам событий
     while (iterator.hasNext) {
-      val line = iterator.head // Только "подсматриваем" строку, не извлекая ее
+      val line = iterator.head
 
       if (line.startsWith("QS")) {
         QuickSearch.parse(iterator, errorsAcc).foreach(builder.qsList.+=)
       } else if (line.startsWith("CARD_SEARCH_START")) {
         CardSearch.parse(iterator, errorsAcc).foreach(builder.cardList.+=)
       } else if (line.startsWith("DOC_OPEN")) {
-        DocOpen.parse(iterator, builder.date, errorsAcc).foreach(builder.opensList.+=)
+        DocOpen.parse(iterator, builder.startTime, errorsAcc).foreach(builder.opensList.+=)
       } else {
-        // Если строка не подошла ни под один шаблон (например, дата в начале), просто пропускаем
         iterator.next()
       }
     }
