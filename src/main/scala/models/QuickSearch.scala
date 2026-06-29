@@ -14,7 +14,6 @@ case class QuickSearch(
                       )
 
 object QuickSearch {
-  // два встречающихся формата даты
   private val fmtEnglish = DateTimeFormatter.ofPattern("EEE,_d_MMM_yyyy_HH:mm:ss_Z", Locale.ENGLISH)
   private val fmtStandard = DateTimeFormatter.ofPattern("d.MM.yyyy_HH:mm:ss")
 
@@ -31,7 +30,6 @@ object QuickSearch {
 
     val dateStr = qsLine.substring(2, startIdx).trim
 
-    // пытаемся получить дату, результат будет Option[LocalDateTime]
     val timestampOpt = if (dateStr.nonEmpty) {
       try {
         Some(LocalDateTime.parse(dateStr, fmtEnglish))
@@ -46,23 +44,27 @@ object QuickSearch {
           }
       }
     } else {
-      None // даты нет, оставляем поле пустым
+      None
     }
 
     val query = qsLine.substring(startIdx + 1, endIdx)
 
     if (iterator.hasNext) {
-      val resultLine = iterator.next()
-      val parts = resultLine.split("\\s+")
-      if (parts.nonEmpty) {
-        Some(QuickSearch(timestampOpt, id = parts.head, query = query, results = parts.tail))
-      } else {
+      val nextLine = iterator.head
+      // если следующая строка это системное событие, значит результатов у поиска нет
+      if (nextLine.startsWith("QS") || nextLine.startsWith("CARD") || nextLine.startsWith("DOC") || nextLine.startsWith("SESSION")) {
+
         errorsAcc.qsMissingResults.add(1L)
-        None
+        Some(QuickSearch(timestampOpt, id = "NO_ID", query = query, results = Array.empty))
+
+      } else {
+        val resultLine = iterator.next()
+        val parts = resultLine.split("\\s+")
+        Some(QuickSearch(timestampOpt, id = parts.head, query = query, results = parts.tail))
       }
     } else {
-      errorsAcc.qsUnexpectedEOF.add(1L)
-      None
+      errorsAcc.qsMissingResults.add(1L)
+      Some(QuickSearch(timestampOpt, id = "NO_ID", query = query, results = Array.empty))
     }
   }
 }

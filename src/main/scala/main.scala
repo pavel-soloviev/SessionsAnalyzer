@@ -4,11 +4,11 @@ import utils.{SparkSetup, ParseErrors}
 
 object main {
   def main(args: Array[String]): Unit = {
-    // 1. Инициализация Spark и менеджера ошибок
+    // инициализация Spark и менеджера ошибок
     val spark = SparkSetup.createSession()
     val errorsAcc = new ParseErrors(spark.sparkContext)
 
-    // 2. Чтение и парсинг логов
+    // чтение и парсинг логов
     val logFilePath = "src/main/resources/sessions/*"
     val rawSessionsRDD = SparkSetup.readRawSessions(spark, logFilePath)
 
@@ -16,14 +16,14 @@ object main {
       UserSession.parse(text, errorsAcc)
     }.cache()
 
-    // Форсируем вычисление RDD
+    // запускаем вычисления
     val totalSessions = sessionsRDD.count()
 
-    // Выводим детальный отчет об ошибках
+    // выводим отчет об ошибках
     errorsAcc.printReport()
     println(s"Всего обработано сессий: $totalSessions")
 
-    // 3. Запуск аналитики независимыми вызовами
+    // запуск аналитики независимыми вызовами
     AccSearchAnalyzer.run(sessionsRDD)
     DocOpensAnalyzer.run(sessionsRDD)
 

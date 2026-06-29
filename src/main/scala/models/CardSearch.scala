@@ -41,23 +41,24 @@ object CardSearch {
     }
 
     val paramsMap = mutable.Map.empty[String, mutable.ListBuffer[String]]
-    var searchId = "UNKNOWN_CARD_ID"
+    var searchId = "NO_ID"
     var results = Array.empty[String]
-    var keepParsing = true // оставил в пользу читаемости
+    var keepParsing = true
 
     while (iterator.hasNext && keepParsing) {
       val line = iterator.next()
 
       if (line.startsWith("CARD_SEARCH_END")) {
         if (iterator.hasNext) {
-          val resultLine = iterator.next()
-          val parts = resultLine.split("\\s+")
-          if (parts.nonEmpty) {
-            searchId = parts.head
-            results = parts.tail
+          val nextLine = iterator.head
+          if (!(nextLine.startsWith("QS") || nextLine.startsWith("CARD") || nextLine.startsWith("DOC") || nextLine.startsWith("SESSION"))) {
+            val resultLine = iterator.next()
+            val parts = resultLine.split("\\s+")
+            if (parts.nonEmpty) {
+              searchId = parts.head
+              results = parts.tail
+            }
           }
-        } else {
-          errorsAcc.cardUnexpectedEOF.add(1L)
         }
         keepParsing = false
       } else if (line.startsWith("$")) {

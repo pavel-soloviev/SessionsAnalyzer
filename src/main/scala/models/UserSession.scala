@@ -42,14 +42,12 @@ object UserSession {
     val iterator = sessionText.split("\n").map(_.trim).filter(_.nonEmpty).iterator.buffered
     val builder = new SessionBuilder()
 
-    // Строгий парсинг времени начала сессии
     if (iterator.hasNext) {
       val firstLine = iterator.head
       try {
         builder.startTime = LocalDateTime.parse(firstLine, formatter)
       } catch {
         case _: DateTimeParseException =>
-          // Фиксируем ошибку кривой даты в первой строке сессии
           errorsAcc.sessionDateParseError.add(1L)
           builder.startTime = LocalDateTime.MIN
       }
