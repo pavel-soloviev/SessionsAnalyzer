@@ -7,7 +7,7 @@ import java.util.Locale
 
 case class QuickSearch(
                         timestamp: Option[LocalDateTime],
-                        id: String,
+                        id: String, // не осознал как скрыть этот id нормально чтобы не хранить
                         query: String,
                         results: Array[String],
                         docOpens: Array[DocOpen] = Array.empty

@@ -56,6 +56,9 @@ object UserSession {
     while (iterator.hasNext) {
       val line = iterator.head
 
+      /* оставил в таком формате, т.к. в моем понимании прописывать единый интерфейс
+       для всех классов и вставлять им префиксы более трудозатратно и не быстрее
+       */
       if (line.startsWith("QS")) {
         QuickSearch.parse(iterator, errorsAcc).foreach(builder.qsList.+=)
       } else if (line.startsWith("CARD_SEARCH_START")) {
