@@ -1,10 +1,9 @@
 package models
 
-import org.apache.spark.util.LongAccumulator
+import utils.ParseErrors
 import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
+import java.time.format.{DateTimeFormatter, DateTimeParseException}
 import scala.collection.mutable.ListBuffer
-import scala.util.Try
 
 case class UserSession(
                         startTime: LocalDateTime,
@@ -20,19 +19,16 @@ class SessionBuilder {
   val opensList: ListBuffer[DocOpen] = ListBuffer.empty
 
   def build(): UserSession = {
-    // группируем все открытия документов по ID поиска
     val opensBySearchId = opensList.groupBy(_.searchId)
 
-    // раскладываем документы по быстрым поискам
     val linkedQs = qsList.map { qs =>
       val docsForThisSearch = opensBySearchId.getOrElse(qs.id, ListBuffer.empty).toArray
-      qs.copy(openedDocs = docsForThisSearch)
+      qs.copy(docOpens = docsForThisSearch)
     }.toArray
 
-    // раскладываем документы по карточкам поиска
     val linkedCs = cardList.map { cs =>
       val docsForThisSearch = opensBySearchId.getOrElse(cs.id, ListBuffer.empty).toArray
-      cs.copy(openedDocs = docsForThisSearch)
+      cs.copy(docOpens = docsForThisSearch)
     }.toArray
 
     UserSession(startTime, linkedQs, linkedCs, opensList.toArray)
@@ -42,13 +38,21 @@ class SessionBuilder {
 object UserSession {
   private val formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy_HH:mm:ss")
 
-  def parse(sessionText: String, errorsAcc: LongAccumulator): UserSession = {
+  def parse(sessionText: String, errorsAcc: ParseErrors): UserSession = {
     val iterator = sessionText.split("\n").map(_.trim).filter(_.nonEmpty).iterator.buffered
     val builder = new SessionBuilder()
 
+    // Строгий парсинг времени начала сессии
     if (iterator.hasNext) {
       val firstLine = iterator.head
-      builder.startTime = Try(LocalDateTime.parse(firstLine, formatter)).getOrElse(LocalDateTime.MIN)
+      try {
+        builder.startTime = LocalDateTime.parse(firstLine, formatter)
+      } catch {
+        case _: DateTimeParseException =>
+          // Фиксируем ошибку кривой даты в первой строке сессии
+          errorsAcc.sessionDateParseError.add(1L)
+          builder.startTime = LocalDateTime.MIN
+      }
     }
 
     while (iterator.hasNext) {

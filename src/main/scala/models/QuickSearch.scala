@@ -1,33 +1,67 @@
 package models
 
-import org.apache.spark.util.LongAccumulator
+import utils.ParseErrors
+import java.time.LocalDateTime
+import java.time.format.{DateTimeFormatter, DateTimeParseException}
+import java.util.Locale
 
 case class QuickSearch(
+                        timestamp: Option[LocalDateTime],
                         id: String,
                         query: String,
                         results: Array[String],
-                        openedDocs: Array[DocOpen] = Array.empty
+                        docOpens: Array[DocOpen] = Array.empty
                       )
 
 object QuickSearch {
-  def parse(iterator: BufferedIterator[String], errorsAcc: LongAccumulator): Option[QuickSearch] = {
-    val qsLine = iterator.next() // пропускаем строку с QS
+  // два встречающихся формата даты
+  private val fmtEnglish = DateTimeFormatter.ofPattern("EEE,_d_MMM_yyyy_HH:mm:ss_Z", Locale.ENGLISH)
+  private val fmtStandard = DateTimeFormatter.ofPattern("d.MM.yyyy_HH:mm:ss")
+
+  def parse(iterator: BufferedIterator[String], errorsAcc: ParseErrors): Option[QuickSearch] = {
+    val qsLine = iterator.next()
 
     val startIdx = qsLine.indexOf("{")
     val endIdx = qsLine.lastIndexOf("}")
-    val query = if (startIdx != -1 && endIdx != -1) qsLine.substring(startIdx + 1, endIdx) else ""
+
+    if (startIdx == -1 || endIdx == -1) {
+      errorsAcc.qsUnexpectedEOF.add(1L)
+      return None
+    }
+
+    val dateStr = qsLine.substring(2, startIdx).trim
+
+    // пытаемся получить дату, результат будет Option[LocalDateTime]
+    val timestampOpt = if (dateStr.nonEmpty) {
+      try {
+        Some(LocalDateTime.parse(dateStr, fmtEnglish))
+      } catch {
+        case _: DateTimeParseException =>
+          try {
+            Some(LocalDateTime.parse(dateStr, fmtStandard))
+          } catch {
+            case _: DateTimeParseException =>
+              errorsAcc.qsDateParseError.add(1L)
+              None
+          }
+      }
+    } else {
+      None // даты нет, оставляем поле пустым
+    }
+
+    val query = qsLine.substring(startIdx + 1, endIdx)
 
     if (iterator.hasNext) {
       val resultLine = iterator.next()
       val parts = resultLine.split("\\s+")
       if (parts.nonEmpty) {
-        Some(QuickSearch(id = parts.head, query = query, results = parts.tail))
+        Some(QuickSearch(timestampOpt, id = parts.head, query = query, results = parts.tail))
       } else {
-        errorsAcc.add(1L)
+        errorsAcc.qsMissingResults.add(1L)
         None
       }
     } else {
-      errorsAcc.add(1L)
+      errorsAcc.qsUnexpectedEOF.add(1L)
       None
     }
   }
